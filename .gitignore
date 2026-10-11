@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Downloaded pretrained embedding models
+/data/embeddings/
+
+# Generated model checkpoints and experiment metrics
+/outputs/
