@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from datasets import DatasetDict, load_dataset
 import torch
+from torch.utils.data import Dataset
 
 from .preprocessing import FastTextPreprocessor
 from .vocabulary import Vocabulary
@@ -15,7 +16,7 @@ TEXT_FIELDS = ("observation_1", "observation_2", "hypothesis_1", "hypothesis_2")
 
 
 @dataclass
-class PreparedSplit:
+class PreparedSplit(Dataset):
     """Four consecutive text rows per example, plus lengths and class labels.
 
     token_ids: (number_of_examples * 4, longest_text_in_this_split)
@@ -26,6 +27,23 @@ class PreparedSplit:
     token_ids: torch.Tensor
     lengths: torch.Tensor
     labels: torch.Tensor
+
+    def __len__(self) -> int:
+        """Count complete ART examples, each containing four text sequences."""
+        return len(self.labels)
+
+    def __getitem__(self, index: int) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        """Return all original tokens, excluding only previously added padding."""
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        start = index * len(TEXT_FIELDS)
+        sequences = tuple(
+            self.token_ids[row, : int(self.lengths[row])]
+            for row in range(start, start + len(TEXT_FIELDS))
+        )
+        return sequences, self.labels[index]
 
 
 @dataclass
