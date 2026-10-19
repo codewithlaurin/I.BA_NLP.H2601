@@ -1,6 +1,7 @@
 """Prepare all ART texts and dynamically padded batches for experiments."""
 
 import argparse
+from pathlib import Path
 
 from src.art_reasoning.batching import (
     find_gpu_batch_size,
@@ -8,6 +9,8 @@ from src.art_reasoning.batching import (
     select_device,
 )
 from src.art_reasoning.data import TEXT_FIELDS, load_experiment_data
+from src.art_reasoning.embeddings import load_fasttext_embeddings
+from src.art_reasoning.models.classifier_input import ClassifierInput
 
 
 def main():
@@ -21,11 +24,17 @@ def main():
     )
     parser.add_argument("--max-batch-size", type=int, help="Upper limit for auto sizing")
     parser.add_argument("--cache-dir", help="Optional Hugging Face dataset cache directory")
+    parser.add_argument(
+        "--fasttext-model", type=Path,
+        help="Local 300d FastText .bin file; also build classifier feature vectors",
+    )
     args = parser.parse_args()
     if not 0 <= args.memory_margin < 1:
         parser.error("--memory-margin must be between 0 (inclusive) and 1")
     if args.max_batch_size is not None and args.max_batch_size < 1:
         parser.error("--max-batch-size must be positive")
+    if args.fasttext_model is not None and not args.fasttext_model.expanduser().is_file():
+        parser.error(f"FastText model file not found: {args.fasttext_model}")
     batch_size = None
     if args.batch_size != "auto":
         try:
@@ -47,6 +56,10 @@ def main():
             f"labels {tuple(split.labels.shape)}"
         )
     device = select_device()
+    input_builder = None
+    if args.fasttext_model is not None:
+        embedding = load_fasttext_embeddings(data.vocabulary, args.fasttext_model)
+        input_builder = ClassifierInput(embedding).to(device).eval()
     if batch_size is None:
         # Include the longest text from any split so evaluation batches also fit.
         longest_split = max(splits.values(), key=lambda split: split.token_ids.shape[1])
@@ -55,11 +68,12 @@ def main():
             device,
             memory_margin=args.memory_margin,
             max_batch_size=min(args.max_batch_size or len(data.train), len(data.train)),
+            probe_step=input_builder,
         )
         if device.type != "cpu":
             print(
-                "Auto sizing measures input tensors; include a training-step probe "
-                "once the model is implemented."
+                "Auto sizing covers input preparation only; include the classifier's "
+                "training step once it is implemented."
             )
     print(f"Device: {device}; batch size: {batch_size} complete examples")
     loaders = {
@@ -71,6 +85,10 @@ def main():
     batch = next(iter(loaders["train"])).to(device)
     print(f"First training batch: IDs {tuple(batch.token_ids.shape)}")
     print(f"Original lengths for its first example: {batch.lengths[0].tolist()}")
+    if input_builder is not None:
+        features = input_builder(batch)
+        print(f"Classifier input: {tuple(features.shape)} ({features.dtype})")
+        print(f"Class labels: {tuple(batch.labels.shape)}")
 
 
 if __name__ == "__main__":
