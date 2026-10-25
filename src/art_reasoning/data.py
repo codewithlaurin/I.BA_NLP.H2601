@@ -101,19 +101,21 @@ def _encode_split(
 
 
 def prepare_experiment_data(
-    dataset: Mapping[str, Iterable[Mapping]], *, include_test: bool = True
+    dataset: Mapping[str, Iterable[Mapping]], *, include_test: bool = True,
+    vocabulary: Vocabulary | None = None,
 ) -> ExperimentData:
-    """Preprocess all splits and encode them using a training-only vocabulary.
+    """Preprocess splits using a new training-only or supplied saved vocabulary.
 
     Each example contributes four rows in TEXT_FIELDS order. Validation and
     test words absent from training become <UNK>. Padding widths are computed
     separately per split; no text is truncated and the vocabulary stays fixed.
+    A supplied vocabulary reuses the exact mapping of a prior experiment.
     """
     processor = FastTextPreprocessor()
     train_tokens, train_labels = _tokenize_split(dataset["train"], processor)
     if not train_labels:
         raise ValueError("The training split must contain at least one example")
-    vocabulary = Vocabulary(train_tokens)
+    vocabulary = vocabulary if vocabulary is not None else Vocabulary(train_tokens)
     train = _encode_split(train_tokens, train_labels, vocabulary)
     del train_tokens
 
@@ -139,12 +141,13 @@ def prepare_experiment_data(
 
 
 def load_experiment_data(
-    cache_dir: str | None = None, *, include_test: bool = True
+    cache_dir: str | None = None, *, include_test: bool = True,
+    vocabulary: Vocabulary | None = None,
 ) -> ExperimentData:
     """Run the full pipeline from dataset loading to word-ID matrices."""
     return prepare_experiment_data(
         load_art_dataset(cache_dir=cache_dir, include_test=include_test),
-        include_test=include_test,
+        include_test=include_test, vocabulary=vocabulary,
     )
 
 

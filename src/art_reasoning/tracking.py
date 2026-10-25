@@ -65,12 +65,17 @@ def run_details(run: wandb.Run, mode: str) -> dict:
     }
 
 
-def log_best_model(run: wandb.Run, checkpoint: Path, inputs_path: Path) -> None:
+def log_best_model(
+    run: wandb.Run, checkpoint: Path, inputs_path: Path, model_type: str = "mean_pool"
+) -> None:
     """Upload one restorable best-model bundle after training, including frozen inputs."""
     artifact = wandb.Artifact(
-        name=f"classifier-{run.id}",
+        name=f"{'rnn' if model_type == 'rnn' else 'classifier'}-{run.id}",
         type="model",
-        metadata={"checkpoint_metric": "validation/loss", "checkpoint_mode": "min"},
+        metadata={
+            "checkpoint_metric": "validation/loss", "checkpoint_mode": "min",
+            "model_type": model_type,
+        },
     )
     # Preserve the checkpoint's ../inputs.pt reference when downloading the bundle.
     artifact.add_file(str(checkpoint), name="trial/best.pt")

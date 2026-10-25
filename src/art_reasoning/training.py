@@ -1,6 +1,6 @@
-"""Train and validate the frozen-FastText classifier with plain PyTorch."""
+"""Shared training and checkpointing for mean-pooled and recurrent ART models."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import json
 import hashlib
 from importlib.metadata import version
@@ -17,8 +17,11 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .data import TEXT_FIELDS
+from .embeddings import EMBEDDING_DIM
 from .models.classifier import Classifier
 from .models.classifier_input import ClassifierInput
+from .models.rnn_classifier import RNNClassifier
+from .models.sequence_encoder import SequenceEncoder
 from .tracking import TrackingConfig, log_best_model, run_details, start_run
 from .vocabulary import Vocabulary
 
@@ -33,6 +36,7 @@ class TrainingConfig:
     patience: int = 5
     min_delta: float = 0.0
     seed: int = 42
+    gradient_clip_norm: float | None = None
 
     def __post_init__(self):
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
@@ -47,6 +51,39 @@ class TrainingConfig:
             raise ValueError("min_delta must be finite and nonnegative")
         if not 0 <= self.seed < 2**32:
             raise ValueError("seed must be an integer between 0 and 2**32 - 1")
+        if self.gradient_clip_norm is not None and (
+            not math.isfinite(self.gradient_clip_norm) or self.gradient_clip_norm <= 0
+        ):
+            raise ValueError("gradient_clip_norm must be finite and positive, or None")
+
+
+@dataclass(frozen=True)
+class RNNTrainingConfig(TrainingConfig):
+    hidden_dim: int = 256
+    gradient_clip_norm: float | None = 1.0
+    rnn_type: str = "gru"
+    rnn_hidden_size: int = 128
+    rnn_dropout: float = 0.0
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.rnn_type not in ("gru", "lstm"):
+            raise ValueError("rnn_type must be 'gru' or 'lstm'")
+        if not isinstance(self.rnn_hidden_size, int) or isinstance(self.rnn_hidden_size, bool) or self.rnn_hidden_size < 1:
+            raise ValueError("rnn_hidden_size must be a positive integer")
+        if not 0 <= self.rnn_dropout < 1:
+            raise ValueError("rnn_dropout must be between 0 (inclusive) and 1")
+
+
+def build_rnn_model(embedding: nn.Embedding, config: RNNTrainingConfig) -> RNNClassifier:
+    """Initialize fresh recurrent and head weights around the frozen embedding."""
+    return RNNClassifier(
+        SequenceEncoder(
+            embedding, hidden_size=config.rnn_hidden_size,
+            rnn_type=config.rnn_type, dropout=config.rnn_dropout,
+        ),
+        hidden_dim=config.hidden_dim, dropout=config.dropout,
+    )
 
 
 def seed_everything(seed: int) -> None:
@@ -57,7 +94,11 @@ def seed_everything(seed: int) -> None:
 
 
 def reproducibility_metadata(
-    input_builder: ClassifierInput, vocabulary: Vocabulary
+    input_builder: ClassifierInput | SequenceEncoder | nn.Embedding,
+    vocabulary: Vocabulary,
+    *,
+    entry_point: str = "train_classifier.py",
+    model_version: str = "frozen-fasttext-mean-pool-mlp-v1",
 ) -> dict:
     """Identify the actual input vectors, ordered vocabulary, code, and libraries.
 
@@ -67,12 +108,14 @@ def reproducibility_metadata(
     root = Path(__file__).resolve().parents[2]
     code_hash = hashlib.sha256()
     paths = sorted((root / "src" / "art_reasoning").rglob("*.py"))
-    for path in [root / "train_classifier.py", *paths]:
+    for path in [root / entry_point, *paths]:
         code_hash.update(str(path.relative_to(root)).encode())
         code_hash.update(path.read_bytes())
-    weights = input_builder.embedding.weight.detach().cpu().contiguous().numpy()
+    embedding = input_builder if isinstance(input_builder, nn.Embedding) else input_builder.embedding
+    weights = embedding.weight.detach().cpu().contiguous().numpy()
     return {
-        "model_version": "frozen-fasttext-mean-pool-mlp-v1",
+        "model_version": model_version,
+        "entry_point": entry_point,
         "model_code_sha256": code_hash.hexdigest(),
         "embedding_weights_sha256": hashlib.sha256(weights.tobytes()).hexdigest(),
         "vocabulary_sha256": hashlib.sha256(
@@ -87,12 +130,14 @@ def reproducibility_metadata(
     }
 
 
-def build_optimizer(classifier: Classifier, config: TrainingConfig) -> torch.optim.AdamW:
-    """Decay dense weights only; exclude biases and frozen parameters."""
+def build_optimizer(classifier: nn.Module, config: TrainingConfig) -> torch.optim.AdamW:
+    """Decay trainable weights; exclude dense/recurrent biases and frozen embeddings."""
     weights, biases = [], []
     for name, parameter in classifier.named_parameters():
         if parameter.requires_grad:
-            (biases if name.endswith("bias") else weights).append(parameter)
+            local_name = name.rsplit(".", 1)[-1]
+            is_bias = local_name == "bias" or local_name.startswith("bias_")
+            (biases if is_bias else weights).append(parameter)
     return torch.optim.AdamW(
         [
             {"params": weights, "weight_decay": config.weight_decay},
@@ -103,33 +148,45 @@ def build_optimizer(classifier: Classifier, config: TrainingConfig) -> torch.opt
 
 
 def run_epoch(
-    input_builder: ClassifierInput,
-    classifier: Classifier,
+    input_builder: ClassifierInput | None,
+    classifier: Classifier | RNNClassifier,
     loader: DataLoader,
     device: torch.device | str,
     optimizer: torch.optim.Optimizer | None = None,
+    gradient_clip_norm: float | None = None,
 ) -> dict:
     """Return example-weighted loss, accuracy, and count; update only in training.
 
     Logits have shape (B, 2); integer labels have shape (B,) with values 0/1.
     CrossEntropyLoss receives raw logits, with no preceding softmax or sigmoid.
+    Pass input_builder=None for an RNNClassifier that owns its encoder.
     """
     training = optimizer is not None
-    input_builder.eval()
+    if input_builder is not None:
+        input_builder.eval()
     classifier.train(training)
     criterion = nn.CrossEntropyLoss()
     loss_sum = correct = examples = 0
+    gradient_norm_sum = gradient_norm_max = 0.0
+    gradient_steps = 0
     with torch.set_grad_enabled(training):
         for batch in loader:
             batch = batch.to(device)
             if training:
                 optimizer.zero_grad(set_to_none=True)
-            logits = classifier(input_builder(batch))
+            logits = classifier(batch) if input_builder is None else classifier(input_builder(batch))
             loss = criterion(logits, batch.labels)
             if not torch.isfinite(loss).item():
                 raise RuntimeError("Non-finite loss; check inputs and learning rate")
             if training:
                 loss.backward()
+                if gradient_clip_norm is not None:
+                    norm = nn.utils.clip_grad_norm_(
+                        classifier.parameters(), gradient_clip_norm, error_if_nonfinite=True
+                    ).item()
+                    gradient_norm_sum += norm
+                    gradient_norm_max = max(gradient_norm_max, norm)
+                    gradient_steps += 1
                 optimizer.step()
             count = batch.labels.numel()
             loss_sum += loss.detach().item() * count
@@ -137,7 +194,13 @@ def run_epoch(
             examples += count
     if not examples:
         raise ValueError("Cannot run an epoch on an empty split")
-    return {"loss": loss_sum / examples, "accuracy": correct / examples, "examples": examples}
+    metrics = {"loss": loss_sum / examples, "accuracy": correct / examples, "examples": examples}
+    if gradient_steps:
+        metrics.update(
+            gradient_norm_mean=gradient_norm_sum / gradient_steps,
+            gradient_norm_max=gradient_norm_max,
+        )
+    return metrics
 
 
 def _save_checkpoint(payload: dict, path: Path) -> None:
@@ -147,11 +210,16 @@ def _save_checkpoint(payload: dict, path: Path) -> None:
     temporary.replace(path)
 
 
-def save_inputs(input_builder: ClassifierInput, vocabulary: Vocabulary, path: Path) -> None:
+def save_inputs(
+    input_builder: ClassifierInput | SequenceEncoder | nn.Embedding,
+    vocabulary: Vocabulary,
+    path: Path,
+) -> None:
     """Store frozen embeddings once per experiment, shared by all trial checkpoints."""
+    embedding = input_builder if isinstance(input_builder, nn.Embedding) else input_builder.embedding
     _save_checkpoint(
         {
-            "embedding_weight": input_builder.embedding.weight.detach().cpu(),
+            "embedding_weight": embedding.weight.detach().cpu(),
             "id_to_token": list(vocabulary.id_to_token),
             "text_fields": list(TEXT_FIELDS),
             "label_to_class": {1: 0, 2: 1},
@@ -162,8 +230,8 @@ def save_inputs(input_builder: ClassifierInput, vocabulary: Vocabulary, path: Pa
 
 
 def train_classifier(
-    input_builder: ClassifierInput,
-    classifier: Classifier,
+    input_builder: ClassifierInput | None,
+    classifier: Classifier | RNNClassifier,
     train_loader: DataLoader,
     validation_loader: DataLoader,
     device: torch.device | str,
@@ -177,10 +245,18 @@ def train_classifier(
 ) -> dict:
     """Select the lowest validation loss, checkpoint each epoch, and stop on a plateau.
 
-    The caller seeds and creates a fresh classifier and loaders for each trial.
+    The caller seeds and creates a fresh model and loaders for each trial.
+    The historical function name is retained for baseline compatibility;
+    pass input_builder=None and a complete RNNClassifier for recurrent training.
     The test split is deliberately absent from this function.
     """
     tracking_config = tracking_config or TrackingConfig()
+    recurrent = isinstance(classifier, RNNClassifier)
+    if recurrent and (input_builder is not None or not isinstance(config, RNNTrainingConfig)):
+        raise ValueError("RNN training requires input_builder=None and RNNTrainingConfig")
+    if not recurrent and input_builder is None:
+        raise ValueError("Mean-pooling training requires its ClassifierInput")
+    encoder = classifier.encoder if recurrent else input_builder
     run_dir.mkdir(parents=True, exist_ok=False)
     optimizer = build_optimizer(classifier, config)
     settings = {
@@ -193,11 +269,21 @@ def train_classifier(
             "betas": list(optimizer.defaults["betas"]), "eps": optimizer.defaults["eps"],
             "amsgrad": optimizer.defaults["amsgrad"], "bias_weight_decay": 0.0,
         },
-        "architecture": str(classifier), "pooling": "masked_mean_then_concatenate",
-        "embedding_dim": input_builder.embedding.embedding_dim, "embeddings_frozen": True,
+        "model_type": "rnn" if recurrent else "mean_pool",
+        "architecture": str(classifier),
+        "pooling": "top_layer_final_hidden_then_concatenate" if recurrent else "masked_mean_then_concatenate",
+        "embedding_dim": encoder.embedding.embedding_dim, "embeddings_frozen": True,
+        "trainable_parameters": sum(p.numel() for p in classifier.parameters() if p.requires_grad),
+        "frozen_embedding_parameters": encoder.embedding.weight.numel(),
         "text_fields": list(TEXT_FIELDS), "output_dim": 2,
         "label_smoothing": 0.0, "scheduler": None,
     }
+    if recurrent:
+        settings.update(
+            rnn_num_layers=classifier.encoder.rnn.num_layers,
+            rnn_bidirectional=classifier.encoder.rnn.bidirectional,
+            classifier_input_dim=classifier.encoder.output_dim,
+        )
     (run_dir / "config.json").write_text(json.dumps(settings, indent=2) + "\n")
     best_loss = stopping_best = math.inf
     best_accuracy = None
@@ -213,7 +299,10 @@ def train_classifier(
         seed_everything(config.seed)
         training_started = perf_counter()
         for epoch in range(1, config.epochs + 1):
-            train_metrics = run_epoch(input_builder, classifier, train_loader, device, optimizer)
+            train_metrics = run_epoch(
+                input_builder, classifier, train_loader, device, optimizer,
+                gradient_clip_norm=config.gradient_clip_norm,
+            )
             validation_metrics = run_epoch(input_builder, classifier, validation_loader, device)
             metrics = {
                 "epoch": epoch, "learning_rate": config.learning_rate,
@@ -231,7 +320,8 @@ def train_classifier(
             else:
                 bad_epochs += 1
             checkpoint = {
-                "classifier_state": classifier.state_dict(),
+                "checkpoint_format_version": 2 if recurrent else 1,
+                "model_type": settings["model_type"],
                 "optimizer_state": optimizer.state_dict(),
                 "config": settings, "epoch": epoch, "metrics": metrics,
                 "best_validation_loss": best_loss, "best_epoch": best_epoch,
@@ -239,6 +329,14 @@ def train_classifier(
                 "bad_epochs": bad_epochs,
                 "inputs_file": os.path.relpath(inputs_path, run_dir),
             }
+            if recurrent:
+                # Frozen inputs are stored once, not duplicated in each checkpoint.
+                checkpoint["model_state"] = {
+                    name: value for name, value in classifier.state_dict().items()
+                    if name != "encoder.embedding.weight"
+                }
+            else:
+                checkpoint["classifier_state"] = classifier.state_dict()
             _save_checkpoint(checkpoint, run_dir / "last.pt")
             if improved:
                 _save_checkpoint(checkpoint, run_dir / "best.pt")
@@ -263,29 +361,57 @@ def train_classifier(
             **identity,
         }
         if tracking_config.log_model and tracking_config.mode != "disabled":
-            log_best_model(tracking, run_dir / "best.pt", inputs_path)
+            log_best_model(
+                tracking, run_dir / "best.pt", inputs_path, model_type=settings["model_type"]
+            )
         tracking.summary.update(result)
     (run_dir / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
 
-def load_trained_classifier(
-    checkpoint_path: Path | str, device: torch.device | str = "cpu"
-) -> tuple[ClassifierInput, Classifier, Vocabulary]:
-    """Restore inference models and vocabulary; keep inputs.pt beside trial folders."""
-    checkpoint_path = Path(checkpoint_path)
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    inputs = torch.load(
-        checkpoint_path.parent / checkpoint["inputs_file"], map_location="cpu", weights_only=True
-    )
+def load_inputs(path: Path | str) -> tuple[nn.Embedding, Vocabulary]:
+    """Restore a saved frozen embedding and its exact training-vocabulary mapping."""
+    inputs = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
     vocabulary = Vocabulary([inputs["id_to_token"][2:]])
     if list(vocabulary.id_to_token) != inputs["id_to_token"] or inputs["text_fields"] != list(TEXT_FIELDS):
-        raise ValueError("Checkpoint vocabulary or text-field order is incompatible")
+        raise ValueError("Saved vocabulary or text-field order is incompatible")
+    if inputs["label_to_class"] != {1: 0, 2: 1}:
+        raise ValueError("Saved label mapping is incompatible")
+    if inputs["embedding_weight"].shape != (len(vocabulary), EMBEDDING_DIM):
+        raise ValueError("Saved embedding shape does not match the vocabulary and dimension")
     embedding = nn.Embedding.from_pretrained(
         inputs["embedding_weight"], freeze=True, padding_idx=Vocabulary.PAD_ID
     )
+    return embedding, vocabulary
+
+
+def load_trained_classifier(
+    checkpoint_path: Path | str, device: torch.device | str = "cpu"
+) -> tuple[ClassifierInput, Classifier, Vocabulary]:
+    """Restore current or historical mean-pooling checkpoints for inference."""
+    checkpoint_path = Path(checkpoint_path).expanduser()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if checkpoint.get("model_type", "mean_pool") != "mean_pool":
+        raise ValueError("Use load_trained_rnn() for a recurrent checkpoint")
+    embedding, vocabulary = load_inputs(checkpoint_path.parent / checkpoint["inputs_file"])
     input_builder = ClassifierInput(embedding).to(device).eval()
     settings = checkpoint["config"]
     classifier = Classifier(hidden_dim=settings["hidden_dim"], dropout=settings["dropout"])
     classifier.load_state_dict(checkpoint["classifier_state"])
     return input_builder, classifier.to(device).eval(), vocabulary
+
+
+def load_trained_rnn(
+    checkpoint_path: Path | str, device: torch.device | str = "cpu"
+) -> tuple[RNNClassifier, Vocabulary]:
+    """Restore GRU/LSTM and head using only the checkpoint and shared inputs.pt."""
+    checkpoint_path = Path(checkpoint_path).expanduser()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if checkpoint.get("model_type") != "rnn" or checkpoint.get("checkpoint_format_version") != 2:
+        raise ValueError("Expected a version-2 recurrent checkpoint")
+    embedding, vocabulary = load_inputs(checkpoint_path.parent / checkpoint["inputs_file"])
+    names = {field.name for field in fields(RNNTrainingConfig)}
+    config = RNNTrainingConfig(**{key: value for key, value in checkpoint["config"].items() if key in names})
+    model = build_rnn_model(embedding, config)
+    model.load_state_dict({**checkpoint["model_state"], "encoder.embedding.weight": embedding.weight})
+    return model.to(device).eval(), vocabulary
