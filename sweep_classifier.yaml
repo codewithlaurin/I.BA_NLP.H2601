@@ -1,0 +1,55 @@
+# Mean-pooling baseline: 2 widths x 3 learning rates x 2 dropout values = 12 runs.
+# Only the classifier is trained; FastText embeddings remain frozen.
+name: P1-MeanPool-ClassifierSweep
+description: Compare classifier width, learning rate, and dropout at seed 42.
+program: train_classifier.py
+entity: laurin-uni-workspace
+project: nlp-classifier
+method: grid
+
+metric:
+  name: best_validation_loss
+  goal: minimize
+
+# Hyphenated keys match the CLI flags expanded by ${args}.
+parameters:
+  hidden-dim:
+    values: [128, 256]
+  learning-rate:
+    values: [0.0001, 0.001, 0.003]
+  dropout:
+    values: [0.0, 0.2]
+  weight-decay:
+    value: 0.0001
+  batch-size:
+    value: 64
+  epochs:
+    value: 20
+  patience:
+    value: 3
+  min-delta:
+    value: 0.0
+  seed:
+    value: 42
+
+# Each worker process trains one fresh head with one scalar learning rate.
+# The baseline CLI currently loads inputs from the local FastText binary.
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --fasttext-model
+  - data/embeddings/cc.en.300.bin
+  - --wandb-project
+  - nlp-classifier
+  - --wandb-entity
+  - laurin-uni-workspace
+  - --wandb-group
+  - P1-MeanPool-ClassifierSweep
+  - --wandb-mode
+  - online
+  - --wandb-name
+  - MeanPool-Sweep-h{hidden_dim}-lr{learning_rate}-drop{dropout}-seed{seed}
