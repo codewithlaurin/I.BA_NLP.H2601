@@ -222,3 +222,6 @@ __marimo__/
 
 # Generated model checkpoints and experiment metrics
 /outputs/
+
+# W&B local run files (training normally stores these under outputs/)
+/wandb/

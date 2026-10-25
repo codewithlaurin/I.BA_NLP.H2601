@@ -1,1 +1,1 @@
-"""Classifier input preparation and future classifier/RNN architectures."""
+"""Classifier input preparation, classifier, and future RNN architectures."""

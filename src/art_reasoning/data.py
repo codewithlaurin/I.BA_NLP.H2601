@@ -1,7 +1,7 @@
 """Load all ART splits and prepare padded word-ID matrices for experiments."""
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from datasets import DatasetDict, load_dataset
 import torch
@@ -48,17 +48,22 @@ class PreparedSplit(Dataset):
 
 @dataclass
 class ExperimentData:
-    """All prepared splits sharing one fixed training vocabulary."""
+    """Prepared splits sharing one vocabulary; test data is optional."""
 
     train: PreparedSplit
     validation: PreparedSplit
-    test: PreparedSplit
+    test: PreparedSplit | None
     vocabulary: Vocabulary
+    split_versions: dict = field(default_factory=dict)
 
 
-def load_art_dataset(cache_dir: str | None = None) -> DatasetDict:
-    """Load every example from the training, validation, and test splits."""
-    return load_dataset(DATASET_NAME, cache_dir=cache_dir)
+def load_art_dataset(
+    cache_dir: str | None = None, *, include_test: bool = True
+) -> DatasetDict:
+    """Request train/validation only unless the caller explicitly includes test."""
+    names = ["train", "validation"] + (["test"] if include_test else [])
+    splits = load_dataset(DATASET_NAME, cache_dir=cache_dir, split=names)
+    return DatasetDict(dict(zip(names, splits, strict=True)))
 
 
 def _tokenize_split(
@@ -95,7 +100,9 @@ def _encode_split(
     )
 
 
-def prepare_experiment_data(dataset: Mapping[str, Iterable[Mapping]]) -> ExperimentData:
+def prepare_experiment_data(
+    dataset: Mapping[str, Iterable[Mapping]], *, include_test: bool = True
+) -> ExperimentData:
     """Preprocess all splits and encode them using a training-only vocabulary.
 
     Each example contributes four rows in TEXT_FIELDS order. Validation and
@@ -116,14 +123,29 @@ def prepare_experiment_data(dataset: Mapping[str, Iterable[Mapping]]) -> Experim
     validation = _encode_split(validation_tokens, validation_labels, vocabulary)
     del validation_tokens
 
-    test_tokens, test_labels = _tokenize_split(dataset["test"], processor)
-    test = _encode_split(test_tokens, test_labels, vocabulary)
-    return ExperimentData(train, validation, test, vocabulary)
+    test = None
+    if include_test:
+        test_tokens, test_labels = _tokenize_split(dataset["test"], processor)
+        test = _encode_split(test_tokens, test_labels, vocabulary)
+    names = ("train", "validation", "test") if include_test else ("train", "validation")
+    split_versions = {
+        name: {
+            "version": str(getattr(getattr(dataset[name], "info", None), "version", None)),
+            "fingerprint": getattr(dataset[name], "_fingerprint", None),
+        }
+        for name in names
+    }
+    return ExperimentData(train, validation, test, vocabulary, split_versions)
 
 
-def load_experiment_data(cache_dir: str | None = None) -> ExperimentData:
+def load_experiment_data(
+    cache_dir: str | None = None, *, include_test: bool = True
+) -> ExperimentData:
     """Run the full pipeline from dataset loading to word-ID matrices."""
-    return prepare_experiment_data(load_art_dataset(cache_dir=cache_dir))
+    return prepare_experiment_data(
+        load_art_dataset(cache_dir=cache_dir, include_test=include_test),
+        include_test=include_test,
+    )
 
 
 def main():
