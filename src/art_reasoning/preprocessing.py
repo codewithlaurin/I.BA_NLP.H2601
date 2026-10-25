@@ -39,6 +39,8 @@ class FastTextPreprocessor:
 
     def tokenize(self, text: str) -> list[str]:
         """Split preprocessed text on whitespace into ordered word-level tokens."""
+        # After cleaning, FastText's tokenizer gave identical training tokens.
+        # Keep the simpler splitter;
         return self.preprocess(text).split()
 
     def tokenize_batch(self, texts: Iterable[str]) -> list[list[str]]:
