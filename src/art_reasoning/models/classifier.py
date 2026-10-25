@@ -1,4 +1,4 @@
-"""Two-layer classifier for the pooled ART text representations."""
+"""Two-layer classifier for fixed-size mean-pooled or recurrent ART features."""
 
 import torch
 from torch import nn
