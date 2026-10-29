@@ -1,0 +1,63 @@
+# Six controlled runs around the best seed-42 GRU; see docs/RNN_REGULARIZATION.md.
+# A run cap limits trials, not elapsed time. Start one sequential agent.
+name: P1-RNN-Regularization
+description: Compare recurrent dropout and weight decay around GRU h256 lr0.003.
+program: train_rnn.py
+entity: laurin-uni-workspace
+project: nlp-classifier
+method: grid
+run_cap: 6
+
+metric:
+  name: best_validation_loss
+  goal: minimize
+
+parameters:
+  rnn-type:
+    value: gru
+  rnn-hidden-size:
+    value: 256
+  learning-rate:
+    value: 0.003
+  rnn-dropout:
+    values: [0.0, 0.2, 0.4]
+  weight-decay:
+    values: [0.0001, 0.01]
+  hidden-dim:
+    value: 256
+  dropout:
+    value: 0.2
+  batch-size:
+    value: 64
+  epochs:
+    value: 20
+  patience:
+    value: 5
+  min-delta:
+    value: 0.0
+  gradient-clip-norm:
+    value: 1.0
+  seed:
+    value: 42
+  device:
+    value: auto
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --inputs-path
+  - outputs/experiments/20261025-134703-ebc0827b/inputs.pt
+  - --wandb-project
+  - nlp-classifier
+  - --wandb-entity
+  - laurin-uni-workspace
+  - --wandb-group
+  - P1-RNN
+  - --wandb-mode
+  - online
+  - --wandb-name
+  - RNN-Reg-{rnn_type}-h{rnn_hidden_size}-lr{learning_rate}-rdrop{rnn_dropout}-wd{weight_decay}-seed{seed}
