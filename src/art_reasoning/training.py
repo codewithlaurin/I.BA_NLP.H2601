@@ -64,6 +64,7 @@ class RNNTrainingConfig(TrainingConfig):
     rnn_type: str = "gru"
     rnn_hidden_size: int = 128
     rnn_dropout: float = 0.0
+    rnn_bidirectional: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -73,6 +74,8 @@ class RNNTrainingConfig(TrainingConfig):
             raise ValueError("rnn_hidden_size must be a positive integer")
         if not 0 <= self.rnn_dropout < 1:
             raise ValueError("rnn_dropout must be between 0 (inclusive) and 1")
+        if not isinstance(self.rnn_bidirectional, bool):
+            raise ValueError("rnn_bidirectional must be a boolean")
 
 
 def build_rnn_model(embedding: nn.Embedding, config: RNNTrainingConfig) -> RNNClassifier:
@@ -81,6 +84,7 @@ def build_rnn_model(embedding: nn.Embedding, config: RNNTrainingConfig) -> RNNCl
         SequenceEncoder(
             embedding, hidden_size=config.rnn_hidden_size,
             rnn_type=config.rnn_type, dropout=config.rnn_dropout,
+            bidirectional=config.rnn_bidirectional,
         ),
         hidden_dim=config.hidden_dim, dropout=config.dropout,
     )
@@ -282,6 +286,7 @@ def train_classifier(
         settings.update(
             rnn_num_layers=classifier.encoder.rnn.num_layers,
             rnn_bidirectional=classifier.encoder.rnn.bidirectional,
+            rnn_num_directions=classifier.encoder.num_directions,
             classifier_input_dim=classifier.encoder.output_dim,
         )
     (run_dir / "config.json").write_text(json.dumps(settings, indent=2) + "\n")
@@ -411,6 +416,8 @@ def load_trained_rnn(
         raise ValueError("Expected a version-2 recurrent checkpoint")
     embedding, vocabulary = load_inputs(checkpoint_path.parent / checkpoint["inputs_file"])
     names = {field.name for field in fields(RNNTrainingConfig)}
+    # Historical checkpoints omit the direction or record False in metadata.
+    # The dataclass default reconstructs their original forward-only architecture.
     config = RNNTrainingConfig(**{key: value for key, value in checkpoint["config"].items() if key in names})
     model = build_rnn_model(embedding, config)
     model.load_state_dict({**checkpoint["model_state"], "encoder.embedding.weight": embedding.weight})

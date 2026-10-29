@@ -15,13 +15,15 @@ from ..embeddings import EMBEDDING_DIM
 
 
 class SequenceEncoder(nn.Module):
-    """Return concatenated top-layer final states shaped (B, 4 * hidden_size).
+    """Return top-layer final states shaped (B, 4 * hidden_size * directions).
 
-    One two-layer, unidirectional GRU (default) or LSTM shares parameters
+    One two-layer GRU (default) or LSTM shares parameters
     across all fields. Each field starts with a fresh zero recurrent state.
     Recorded lengths exclude padding; empty fields return exact zero vectors.
     The embedding is frozen, while both recurrent layers remain trainable.
     ``dropout`` applies between recurrent layers, separately from head dropout.
+    Direction defaults to forward-only; bidirectional states concatenate
+    forward then backward for each field, before concatenating the four fields.
     """
 
     def __init__(
@@ -30,6 +32,7 @@ class SequenceEncoder(nn.Module):
         hidden_size: int = 128,
         rnn_type: Literal["gru", "lstm"] = "gru",
         dropout: float = 0.0,
+        bidirectional: bool = False,
     ) -> None:
         super().__init__()
         if embedding.embedding_dim != EMBEDDING_DIM:
@@ -40,12 +43,17 @@ class SequenceEncoder(nn.Module):
             raise ValueError("rnn_type must be 'gru' or 'lstm'")
         if not 0 <= dropout < 1:
             raise ValueError("dropout must be between 0 (inclusive) and 1")
+        if not isinstance(bidirectional, bool):
+            raise ValueError("bidirectional must be a boolean")
 
         self.embedding = embedding
         self.embedding.requires_grad_(False)
         self.hidden_size = hidden_size
         self.rnn_type = rnn_type
-        self.output_dim = len(TEXT_FIELDS) * hidden_size
+        self.bidirectional = bidirectional
+        self.num_directions = 2 if bidirectional else 1
+        self.field_output_dim = hidden_size * self.num_directions
+        self.output_dim = len(TEXT_FIELDS) * self.field_output_dim
         recurrent_class = nn.GRU if rnn_type == "gru" else nn.LSTM
         self.rnn = recurrent_class(
             input_size=EMBEDDING_DIM,
@@ -53,7 +61,7 @@ class SequenceEncoder(nn.Module):
             num_layers=2,
             batch_first=True,
             dropout=dropout,
-            bidirectional=False,
+            bidirectional=bidirectional,
         ).to(device=embedding.weight.device, dtype=embedding.weight.dtype)
 
     def forward(self, batch: TextBatch) -> torch.Tensor:
@@ -71,7 +79,7 @@ class SequenceEncoder(nn.Module):
         if ((lengths < 0) | (lengths > ids.shape[2])).any().item():
             raise ValueError("Original lengths must be between zero and the padded width")
 
-        features = self.embedding.weight.new_zeros((lengths.numel(), self.hidden_size))
+        features = self.embedding.weight.new_zeros((lengths.numel(), self.field_output_dim))
         nonempty_cpu = lengths.nonzero(as_tuple=True)[0]
         if nonempty_cpu.numel():
             nonempty = nonempty_cpu.to(ids.device)
@@ -84,7 +92,12 @@ class SequenceEncoder(nn.Module):
             # With unsorted packing, PyTorch restores h_n to the input order.
             _, state = self.rnn(packed)
             hidden = state[0] if self.rnn_type == "lstm" else state
-            # The last layer summarizes each complete, unpadded field.
-            features = features.index_copy(0, nonempty, hidden[-1])
+            # h_n orders layer then direction. For a bidirectional top layer,
+            # [-2] is forward and [-1] is backward; both summarize the full text.
+            top_hidden = (
+                torch.cat((hidden[-2], hidden[-1]), dim=-1)
+                if self.bidirectional else hidden[-1]
+            )
+            features = features.index_copy(0, nonempty, top_hidden)
 
         return features.reshape(ids.shape[0], self.output_dim)

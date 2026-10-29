@@ -31,7 +31,11 @@ def main(argv: list[str] | None = None):
     source.add_argument("--fasttext-model", type=Path, help="Local 300d FastText .bin model")
     source.add_argument("--inputs-path", type=Path, help="Reuse a previous experiment's inputs.pt")
     parser.add_argument("--rnn-type", choices=("gru", "lstm"), default="gru")
-    parser.add_argument("--rnn-hidden-size", type=int, default=128)
+    parser.add_argument("--rnn-hidden-size", type=int, default=128, help="Hidden width per direction")
+    parser.add_argument(
+        "--bidirectional", action=argparse.BooleanOptionalAction, default=False,
+        help="Encode each text forward and backward (default: forward-only)",
+    )
     parser.add_argument("--rnn-dropout", type=float, default=0.0, help="Dropout between recurrent layers")
     parser.add_argument("--hidden-dim", type=int, default=256, help="Classifier hidden width")
     parser.add_argument("--dropout", type=float, default=0.2, help="Classifier dropout")
@@ -57,7 +61,8 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--evaluate-test", action="store_true", help="Final test evaluation of the selected checkpoint")
     parser.add_argument(
         "--wandb-name", default=os.environ.get("WANDB_NAME"),
-        help="Run name/template: {rnn_type}, {rnn_hidden_size}, {learning_rate}, {seed}",
+        help="Run name/template: {rnn_type}, {rnn_hidden_size}, {learning_rate}, "
+             "{rnn_dropout}, {dropout}, {weight_decay}, {seed}, {direction}, {rnn_bidirectional}",
     )
     parser.add_argument("--wandb-group", default=os.environ.get("WANDB_RUN_GROUP", DEFAULT_GROUP))
     parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", DEFAULT_PROJECT))
@@ -78,11 +83,15 @@ def main(argv: list[str] | None = None):
             hidden_dim=args.hidden_dim, epochs=args.epochs, patience=args.patience,
             min_delta=args.min_delta, seed=args.seed, gradient_clip_norm=args.gradient_clip_norm,
             rnn_type=args.rnn_type, rnn_hidden_size=args.rnn_hidden_size,
-            rnn_dropout=args.rnn_dropout,
+            rnn_dropout=args.rnn_dropout, rnn_bidirectional=args.bidirectional,
         ) for rate in (args.learning_rates or [args.learning_rate])]
         run_names = [args.wandb_name.format(
             rnn_type=config.rnn_type, rnn_hidden_size=config.rnn_hidden_size,
             learning_rate=f"{config.learning_rate:g}", seed=config.seed,
+            rnn_dropout=f"{config.rnn_dropout:g}", dropout=f"{config.dropout:g}",
+            weight_decay=f"{config.weight_decay:g}",
+            direction="bi" if config.rnn_bidirectional else "uni",
+            rnn_bidirectional=config.rnn_bidirectional,
         ) if args.wandb_name else None for config in configurations]
         batch_size = None if args.batch_size == "auto" else int(args.batch_size)
         if batch_size is not None and batch_size < 1:
@@ -141,7 +150,8 @@ def main(argv: list[str] | None = None):
             max_batch_size=min(args.max_batch_size or len(data.train), len(data.train)),
             probe_step=probe_step,
         )
-    print(f"Device: {device}; batch size: {batch_size}; recurrent model: {args.rnn_type}")
+    recurrent_name = f"{'bi' if args.bidirectional else ''}{args.rnn_type}"
+    print(f"Device: {device}; batch size: {batch_size}; recurrent model: {recurrent_name}")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     experiment_dir = args.output_dir.expanduser() / f"rnn-{stamp}-{uuid4().hex[:8]}"
@@ -150,7 +160,7 @@ def main(argv: list[str] | None = None):
     save_inputs(embedding, data.vocabulary, inputs_path)
     versions = reproducibility_metadata(
         embedding, data.vocabulary, entry_point="train_rnn.py",
-        model_version=f"frozen-fasttext-{args.rnn_type}-mlp-v1",
+        model_version=f"frozen-fasttext-{recurrent_name}-mlp-v1",
     )
     group = args.wandb_group or DEFAULT_GROUP
     print(f"Experiment: {experiment_dir}; W&B {tracking_config.mode}; group: {group}", flush=True)
@@ -163,7 +173,7 @@ def main(argv: list[str] | None = None):
             make_dataloader(data.train, batch_size, shuffle=True, seed=config.seed),
             make_dataloader(data.validation, batch_size, seed=config.seed),
             device, config,
-            experiment_dir / f"trial-{index}-{config.rnn_type}-lr-{config.learning_rate:g}",
+            experiment_dir / f"trial-{index}-{recurrent_name}-lr-{config.learning_rate:g}",
             inputs_path,
             metadata={
                 "dataset": DATASET_NAME,
@@ -178,7 +188,7 @@ def main(argv: list[str] | None = None):
             },
             tracking_config=tracking_config, tracking_group=group,
             tracking_name=run_names[index - 1] or (
-                f"RNN-{config.rnn_type}-h{config.rnn_hidden_size}-lr{config.learning_rate:g}"
+                f"RNN-{recurrent_name}-h{config.rnn_hidden_size}-lr{config.learning_rate:g}"
                 f"-seed{config.seed}-{experiment_dir.name}"
             ),
         )
@@ -193,7 +203,7 @@ def main(argv: list[str] | None = None):
         with start_run(
             {"selected": selected, "dataset": DATASET_NAME, "phase": "test",
              "wandb": asdict(tracking_config)},
-            f"selected-{args.rnn_type}-test", experiment_dir / "evaluation", tracking_config,
+            f"selected-{recurrent_name}-test", experiment_dir / "evaluation", tracking_config,
             group=group, job_type="evaluate",
         ) as tracking:
             summary["test"] = run_epoch(None, model, make_dataloader(data.test, batch_size), device)
