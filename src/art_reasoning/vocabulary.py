@@ -1,6 +1,7 @@
 """A fixed word-to-ID vocabulary built from tokenized training texts."""
 
 from collections.abc import Iterable
+from itertools import chain
 from types import MappingProxyType
 
 
@@ -37,6 +38,17 @@ class Vocabulary:
     def __len__(self) -> int:
         """Return the number of entries, including the two reserved tokens."""
         return len(self.token_to_id)
+
+    def extended(self, token_sequences: Iterable[Iterable[str]]) -> "Vocabulary":
+        """Copy this mapping and append inference lookup IDs for new words.
+
+        Existing IDs, including PAD/UNK, never change. This is a cache for
+        fixed pretrained vectors, not a vocabulary learned from held-out
+        labels or word frequencies. The original mapping stays unchanged.
+        """
+        if isinstance(token_sequences, (str, bytes)):
+            raise TypeError("token_sequences must contain token sequences, not text")
+        return Vocabulary(chain((self.id_to_token[2:],), token_sequences))
 
     def encode(self, tokens: Iterable[str]) -> list[int]:
         """Map ordered word tokens to IDs, using <UNK> for unseen words."""

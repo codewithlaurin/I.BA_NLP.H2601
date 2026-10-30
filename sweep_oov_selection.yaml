@@ -1,0 +1,51 @@
+# 2 architectures x 2 validation input policies x 3 matched seeds = 12 runs.
+# Each policy independently selects and stops by validation loss.
+name: P1-OOV-Selection
+description: Compare UNK and FastText lookup throughout validation and checkpoint selection.
+program: train_oov_policy.py
+entity: laurin-uni-workspace
+project: nlp-classifier
+method: grid
+run_cap: 12
+
+metric:
+  name: best_validation_loss
+  goal: minimize
+
+parameters:
+  model-family:
+    values: [mean_pool, gru]
+  oov-policy:
+    values: [unk, fasttext]
+  seed:
+    values: [42, 123, 456]
+  epochs:
+    value: 20
+  batch-size:
+    value: 64
+  baseline-patience:
+    value: 3
+  rnn-patience:
+    value: 5
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - auto
+  - --inputs-path
+  - outputs/experiments/20261025-134703-ebc0827b/inputs.pt
+  - --fasttext-model
+  - data/embeddings/cc.en.300.bin
+  - --wandb-project
+  - nlp-classifier
+  - --wandb-entity
+  - laurin-uni-workspace
+  - --wandb-group
+  - P1-OOV-Selection
+  - --wandb-mode
+  - online
