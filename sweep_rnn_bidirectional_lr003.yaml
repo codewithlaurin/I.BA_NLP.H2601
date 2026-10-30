@@ -1,0 +1,66 @@
+# Four targeted runs: 2 bidirectional cells x 2 recurrent dropout values.
+# Match the unidirectional winner's learning rate, omitted from the prior bi grid.
+name: P1-RNN-Bidirectional-LR003
+description: Compare bidirectional GRU/LSTM at learning rate 0.003 with recurrent dropout 0.2/0.4.
+program: train_rnn.py
+entity: laurin-uni-workspace
+project: nlp-classifier
+method: grid
+run_cap: 4
+
+metric:
+  name: best_validation_loss
+  goal: minimize
+
+parameters:
+  rnn-type:
+    values: [gru, lstm]
+  bidirectional:
+    value: true
+  rnn-hidden-size:
+    value: 128
+  learning-rate:
+    value: 0.003
+  rnn-dropout:
+    values: [0.2, 0.4]
+  hidden-dim:
+    value: 256
+  dropout:
+    value: 0.2
+  weight-decay:
+    value: 0.0001
+  batch-size:
+    value: 64
+  epochs:
+    value: 20
+  patience:
+    value: 5
+  min-delta:
+    value: 0.0
+  gradient-clip-norm:
+    value: 1.0
+  seed:
+    value: 42
+  device:
+    value: auto
+
+# Emit --bidirectional as a boolean flag accepted by the training CLI.
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args_no_boolean_flags}
+  - --inputs-path
+  - outputs/experiments/20261025-134703-ebc0827b/inputs.pt
+  - --wandb-project
+  - nlp-classifier
+  - --wandb-entity
+  - laurin-uni-workspace
+  - --wandb-group
+  - P1-RNN
+  - --wandb-mode
+  - online
+  - --wandb-name
+  - RNN-Followup-{direction}-{rnn_type}-h{rnn_hidden_size}-lr{learning_rate}-rdrop{rnn_dropout}-seed{seed}
