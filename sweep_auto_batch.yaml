@@ -1,0 +1,39 @@
+# Two selected configurations, one fresh training run each, on this machine.
+# Automatic sizing uses the existing full-step probe and 20% headroom.
+name: P1-AutoBatch
+description: Retrain the selected mean-pooling FastText and GRU UNK configurations with auto batch size.
+program: train_auto_batch.py
+entity: laurin-uni-workspace
+project: nlp-classifier
+method: grid
+run_cap: 2
+
+metric:
+  name: best_validation_loss
+  goal: minimize
+
+parameters:
+  reference-checkpoint:
+    values:
+      - outputs/oov-selection/mean_pool-fasttext-seed42-20261030-103403-73a9199b/trial/best.pt
+      - outputs/oov-selection/gru-unk-seed42-20261030-104206-3c766c57/trial/best.pt
+  batch-size:
+    value: auto
+  memory-margin:
+    value: 0.2
+  seed:
+    value: 42
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - mps
+  - --wandb-group
+  - P1-AutoBatch
+  - --wandb-mode
+  - online

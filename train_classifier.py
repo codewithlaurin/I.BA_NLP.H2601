@@ -1,4 +1,4 @@
-"""Prepare ART texts or train the classifier with a local 300d FastText binary."""
+"""Prepare ART texts or train with a FastText binary or saved frozen inputs."""
 
 import argparse
 from dataclasses import asdict
@@ -19,18 +19,21 @@ from src.art_reasoning.tracking import (
     DEFAULT_ENTITY, DEFAULT_PROJECT, TrackingConfig, run_details, start_run,
 )
 from src.art_reasoning.training import (
-    TrainingConfig, build_optimizer, load_trained_classifier, run_epoch,
+    TrainingConfig, build_optimizer, load_inputs, load_trained_classifier, run_epoch,
     reproducibility_metadata, save_inputs, seed_everything, train_classifier,
 )
 
 
-def main():
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batch-size", default="auto", help="Examples per batch, or auto (default)")
     parser.add_argument("--memory-margin", type=float, default=0.2, help="Free GPU memory fraction to reserve")
     parser.add_argument("--max-batch-size", type=int, help="Upper limit for auto sizing")
     parser.add_argument("--cache-dir", help="Optional Hugging Face dataset cache directory")
-    parser.add_argument("--fasttext-model", type=Path, help="Local 300d FastText .bin file; enables training")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--fasttext-model", type=Path, help="Local 300d FastText .bin file; enables training")
+    source.add_argument("--inputs-path", type=Path, help="Reuse a saved frozen matrix and vocabulary; enables training")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--hidden-dim", type=int, default=128)
     learning_rates = parser.add_mutually_exclusive_group()
     learning_rates.add_argument("--learning-rate", type=float, default=1e-3)
@@ -67,7 +70,7 @@ def main():
         "--wandb-log-model", action=argparse.BooleanOptionalAction, default=True,
         help="Log each trial's best checkpoint and frozen inputs (default: enabled)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     rates = args.learning_rates or [args.learning_rate]
     try:
         tracking_config = TrackingConfig(
@@ -90,10 +93,11 @@ def main():
         parser.error("--memory-margin must be between 0 (inclusive) and 1")
     if args.max_batch_size is not None and args.max_batch_size < 1:
         parser.error("--max-batch-size must be positive")
-    if args.fasttext_model is not None and not args.fasttext_model.expanduser().is_file():
-        parser.error(f"FastText model file not found: {args.fasttext_model}")
-    if args.evaluate_test and args.fasttext_model is None:
-        parser.error("--evaluate-test requires --fasttext-model")
+    source_path = args.inputs_path or args.fasttext_model
+    if source_path is not None and not source_path.expanduser().is_file():
+        parser.error(f"Input source not found: {source_path}")
+    if args.evaluate_test and source_path is None:
+        parser.error("--evaluate-test requires --fasttext-model or --inputs-path")
     batch_size = None
     if args.batch_size != "auto":
         try:
@@ -103,7 +107,11 @@ def main():
         if batch_size < 1:
             parser.error("--batch-size must be positive")
 
-    data = load_experiment_data(cache_dir=args.cache_dir, include_test=args.evaluate_test)
+    embedding = vocabulary = None
+    if args.inputs_path is not None:
+        embedding, vocabulary = load_inputs(args.inputs_path)
+    data = load_experiment_data(cache_dir=args.cache_dir, include_test=args.evaluate_test,
+                                vocabulary=vocabulary)
     print(f"Vocabulary size (including <PAD> and <UNK>): {len(data.vocabulary)}")
     print(f"Text rows within each example: {', '.join(TEXT_FIELDS)}")
     splits = {name: getattr(data, name) for name in ("train", "validation")}
@@ -111,13 +119,17 @@ def main():
         splits["test"] = data.test
     for name, split in splits.items():
         print(f"{name}: {len(split)} examples, ID matrix {tuple(split.token_ids.shape)}")
-    device = select_device()
+    device = select_device() if args.device == "auto" else torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        parser.error("CUDA was requested but is unavailable")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        parser.error("MPS was requested but is unavailable")
     input_builder = None
     probe_step = None
-    if args.fasttext_model is not None:
-        input_builder = ClassifierInput(
-            load_fasttext_embeddings(data.vocabulary, args.fasttext_model)
-        ).to(device).eval()
+    if source_path is not None:
+        if embedding is None:
+            embedding = load_fasttext_embeddings(data.vocabulary, args.fasttext_model)
+        input_builder = ClassifierInput(embedding).to(device).eval()
 
         def probe_step(batch):
             # Recreate the disposable head/optimizer per attempt: an OOM must
@@ -145,7 +157,7 @@ def main():
         batch = next(iter(make_dataloader(data.train, batch_size, shuffle=True, seed=args.seed)))
         print(f"First training batch: IDs {tuple(batch.token_ids.shape)}")
         print(f"Original lengths for its first example: {batch.lengths[0].tolist()}")
-        print("Data prepared. Supply --fasttext-model to train the classifier.")
+        print("Data prepared. Supply --fasttext-model or --inputs-path to train the classifier.")
         return
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -169,10 +181,13 @@ def main():
             input_builder, classifier, train_loader, validation_loader, device, config,
             experiment_dir / f"trial-{index}-lr-{config.learning_rate:g}", inputs_path,
             metadata={
-                "dataset": DATASET_NAME, "fasttext_model": str(args.fasttext_model),
+                "dataset": DATASET_NAME,
+                "fasttext_model": str(args.fasttext_model) if args.fasttext_model else None,
+                "frozen_inputs_source": str(args.inputs_path) if args.inputs_path else None,
                 "torch_version": str(torch.__version__), "vocabulary_size": len(data.vocabulary),
                 "split_sizes": {name: len(split) for name, split in splits.items()},
                 "device": str(device), "memory_margin": args.memory_margin,
+                "batch_size_automatic": args.batch_size == "auto",
                 "dataset_split_versions": data.split_versions,
                 **versions,
             },
@@ -186,7 +201,7 @@ def main():
     summary = {"trials": results, "selected": selected}
     if args.evaluate_test:
         # Free the current embedding before restoring the chosen checkpoint's copy.
-        del input_builder
+        del input_builder, embedding
         input_builder, classifier, _ = load_trained_classifier(selected["best_checkpoint"], device)
         # Keep final test evaluation separate from the training trials. In
         # offline mode finished W&B runs cannot be resumed to append metrics.
