@@ -44,11 +44,14 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--patience", type=int, default=5, help="Validation checks without improvement before stopping")
     parser.add_argument("--min-delta", type=float, default=0.0, help="Minimum loss decrease to reset patience")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save-accuracy-checkpoint", action="store_true",
+                        help="Also save best_accuracy.pt by validation accuracy; early stopping still uses loss")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/experiments"))
     parser.add_argument("--evaluate-test", action="store_true", help="Evaluate the selected best checkpoint on test once")
     parser.add_argument(
         "--wandb-name", default=os.environ.get("WANDB_NAME"),
-        help="Run name or template with {learning_rate} and {seed} for multi-rate runs",
+        help="Run name/template: {learning_rate}, {seed}, {hidden_dim}, {dropout}, "
+             "{weight_decay}, {batch_size} (requested batch size, or auto)",
     )
     parser.add_argument(
         "--wandb-group", default=os.environ.get("WANDB_RUN_GROUP"),
@@ -81,9 +84,14 @@ def main(argv: list[str] | None = None):
             learning_rate=rate, weight_decay=args.weight_decay, dropout=args.dropout,
             hidden_dim=args.hidden_dim, epochs=args.epochs, patience=args.patience,
             min_delta=args.min_delta, seed=args.seed,
+            save_accuracy_checkpoint=args.save_accuracy_checkpoint,
         ) for rate in rates]
         run_names = [
-            args.wandb_name.format(learning_rate=f"{config.learning_rate:g}", seed=config.seed)
+            args.wandb_name.format(
+                learning_rate=f"{config.learning_rate:g}", seed=config.seed,
+                hidden_dim=config.hidden_dim, dropout=f"{config.dropout:g}",
+                weight_decay=f"{config.weight_decay:g}", batch_size=args.batch_size,
+            )
             if args.wandb_name else None
             for config in configurations
         ]
@@ -206,7 +214,8 @@ def main(argv: list[str] | None = None):
         # Keep final test evaluation separate from the training trials. In
         # offline mode finished W&B runs cannot be resumed to append metrics.
         with start_run(
-            {"selected": selected, "dataset": DATASET_NAME, "wandb": asdict(tracking_config)},
+            {"selected": selected, "dataset": DATASET_NAME, "wandb": asdict(tracking_config),
+             "model_family": "mean_pool", "model_type": "mean_pool"},
             "selected-model-test", experiment_dir / "evaluation", tracking_config,
             group=args.wandb_group or experiment_dir.name, job_type="evaluate",
         ) as tracking:

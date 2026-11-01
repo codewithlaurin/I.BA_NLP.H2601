@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--min-delta", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save-accuracy-checkpoint", action="store_true",
+                        help="Also save best_accuracy.pt by validation accuracy; early stopping still uses loss")
     clipping = parser.add_mutually_exclusive_group()
     clipping.add_argument("--gradient-clip-norm", type=float, default=1.0)
     clipping.add_argument(
@@ -62,7 +64,8 @@ def main(argv: list[str] | None = None):
     parser.add_argument(
         "--wandb-name", default=os.environ.get("WANDB_NAME"),
         help="Run name/template: {rnn_type}, {rnn_hidden_size}, {learning_rate}, "
-             "{rnn_dropout}, {dropout}, {weight_decay}, {seed}, {direction}, {rnn_bidirectional}",
+             "{rnn_dropout}, {dropout}, {weight_decay}, {seed}, {direction}, {rnn_bidirectional}, "
+             "{hidden_dim}, {batch_size} (requested batch size, or auto)",
     )
     parser.add_argument("--wandb-group", default=os.environ.get("WANDB_RUN_GROUP", DEFAULT_GROUP))
     parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", DEFAULT_PROJECT))
@@ -82,6 +85,7 @@ def main(argv: list[str] | None = None):
             learning_rate=rate, weight_decay=args.weight_decay, dropout=args.dropout,
             hidden_dim=args.hidden_dim, epochs=args.epochs, patience=args.patience,
             min_delta=args.min_delta, seed=args.seed, gradient_clip_norm=args.gradient_clip_norm,
+            save_accuracy_checkpoint=args.save_accuracy_checkpoint,
             rnn_type=args.rnn_type, rnn_hidden_size=args.rnn_hidden_size,
             rnn_dropout=args.rnn_dropout, rnn_bidirectional=args.bidirectional,
         ) for rate in (args.learning_rates or [args.learning_rate])]
@@ -90,6 +94,7 @@ def main(argv: list[str] | None = None):
             learning_rate=f"{config.learning_rate:g}", seed=config.seed,
             rnn_dropout=f"{config.rnn_dropout:g}", dropout=f"{config.dropout:g}",
             weight_decay=f"{config.weight_decay:g}",
+            hidden_dim=config.hidden_dim, batch_size=args.batch_size,
             direction="bi" if config.rnn_bidirectional else "uni",
             rnn_bidirectional=config.rnn_bidirectional,
         ) if args.wandb_name else None for config in configurations]
@@ -202,7 +207,7 @@ def main(argv: list[str] | None = None):
         model, _ = load_trained_rnn(selected["best_checkpoint"], device)
         with start_run(
             {"selected": selected, "dataset": DATASET_NAME, "phase": "test",
-             "wandb": asdict(tracking_config)},
+             "wandb": asdict(tracking_config), "model_family": "rnn", "model_type": "rnn"},
             f"selected-{recurrent_name}-test", experiment_dir / "evaluation", tracking_config,
             group=group, job_type="evaluate",
         ) as tracking:

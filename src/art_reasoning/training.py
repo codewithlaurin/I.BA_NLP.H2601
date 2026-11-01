@@ -37,6 +37,7 @@ class TrainingConfig:
     min_delta: float = 0.0
     seed: int = 42
     gradient_clip_norm: float | None = None
+    save_accuracy_checkpoint: bool = False
 
     def __post_init__(self):
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
@@ -274,6 +275,7 @@ def train_classifier(
             "amsgrad": optimizer.defaults["amsgrad"], "bias_weight_decay": 0.0,
         },
         "model_type": "rnn" if recurrent else "mean_pool",
+        "model_family": "rnn" if recurrent else "mean_pool",
         "architecture": str(classifier),
         "pooling": "top_layer_final_hidden_then_concatenate" if recurrent else "masked_mean_then_concatenate",
         "embedding_dim": encoder.embedding.embedding_dim, "embeddings_frozen": True,
@@ -293,6 +295,7 @@ def train_classifier(
     best_loss = stopping_best = math.inf
     best_accuracy = None
     best_epoch = bad_epochs = 0
+    peak_accuracy, peak_accuracy_loss, peak_accuracy_epoch = -math.inf, math.inf, 0
     with start_run(
         settings, tracking_name or run_dir.name, run_dir, tracking_config, tracking_group
     ) as tracking, (run_dir / "metrics.jsonl").open("w") as metrics_file:
@@ -319,6 +322,12 @@ def train_classifier(
             if improved:
                 best_loss, best_epoch = current_loss, epoch
                 best_accuracy = validation_metrics["accuracy"]
+            # Keep accuracy selection independent of loss selection and patience.
+            current_accuracy = validation_metrics["accuracy"]
+            accuracy_improved = (current_accuracy > peak_accuracy or
+                                 (current_accuracy == peak_accuracy and current_loss < peak_accuracy_loss))
+            if accuracy_improved:
+                peak_accuracy, peak_accuracy_loss, peak_accuracy_epoch = current_accuracy, current_loss, epoch
             # min_delta affects patience only: always retain the true best model.
             if current_loss < stopping_best - config.min_delta:
                 stopping_best, bad_epochs = current_loss, 0
@@ -334,6 +343,12 @@ def train_classifier(
                 "bad_epochs": bad_epochs,
                 "inputs_file": os.path.relpath(inputs_path, run_dir),
             }
+            if config.save_accuracy_checkpoint:
+                checkpoint.update(
+                    peak_validation_accuracy=peak_accuracy,
+                    peak_accuracy_epoch=peak_accuracy_epoch,
+                    validation_loss_at_peak_accuracy=peak_accuracy_loss,
+                )
             if recurrent:
                 # Frozen inputs are stored once, not duplicated in each checkpoint.
                 checkpoint["model_state"] = {
@@ -345,6 +360,11 @@ def train_classifier(
             _save_checkpoint(checkpoint, run_dir / "last.pt")
             if improved:
                 _save_checkpoint(checkpoint, run_dir / "best.pt")
+            if config.save_accuracy_checkpoint and accuracy_improved:
+                _save_checkpoint(
+                    {**checkpoint, "checkpoint_selection_metric": "validation_accuracy"},
+                    run_dir / "best_accuracy.pt",
+                )
             metrics_file.write(json.dumps(metrics) + "\n")
             metrics_file.flush()
             tracking.log(metrics, step=epoch)
@@ -365,9 +385,17 @@ def train_classifier(
             "training_duration_seconds": perf_counter() - training_started,
             **identity,
         }
+        if config.save_accuracy_checkpoint:
+            result.update(
+                peak_validation_accuracy=peak_accuracy,
+                peak_accuracy_epoch=peak_accuracy_epoch,
+                validation_loss_at_peak_accuracy=peak_accuracy_loss,
+                best_accuracy_checkpoint=str(run_dir / "best_accuracy.pt"),
+            )
         if tracking_config.log_model and tracking_config.mode != "disabled":
             log_best_model(
-                tracking, run_dir / "best.pt", inputs_path, model_type=settings["model_type"]
+                tracking, run_dir / "best.pt", inputs_path, model_type=settings["model_type"],
+                accuracy_checkpoint=run_dir / "best_accuracy.pt" if config.save_accuracy_checkpoint else None,
             )
         tracking.summary.update(result)
     (run_dir / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
