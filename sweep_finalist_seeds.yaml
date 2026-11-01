@@ -1,0 +1,32 @@
+# Four configurations selected by logged validation loss/accuracy x three fresh seeds.
+name: P1-Finalists-NewSeeds
+description: Repeat the loss- and accuracy-ranked mean-pooling and RNN finalists on three unused seeds.
+program: train_finalist_seeds.py
+entity: laurin-uni-workspace
+project: nlp-classifier
+method: grid
+run_cap: 12
+
+metric:
+  name: best_validation_loss
+  goal: minimize
+
+parameters:
+  candidate:
+    values: [mean_pool-loss, mean_pool-accuracy, rnn-loss, rnn-accuracy]
+  seed:
+    values: [101, 202, 303]
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - mps
+  - --wandb-group
+  - P1-Finalists-NewSeeds
+  - --wandb-mode
+  - online

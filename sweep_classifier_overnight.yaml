@@ -1,0 +1,56 @@
+# 2 batches x 3 rates x 3 decays x 3 dropouts x 3 head widths = 162 runs at seed 42.
+name: P1-MeanPool-Batch-LR-Decay-Dropout-Width
+description: Tune mean-pooling batch size, learning rate, AdamW decay, classifier dropout, and classifier width at seed 42.
+program: train_classifier.py
+entity: laurin-uni-workspace
+project: nlp-classifier
+method: grid
+run_cap: 162
+
+metric:
+  name: best_validation_loss
+  goal: minimize
+
+parameters:
+  batch-size:
+    values: [64, 256]
+  learning-rate:
+    values: [0.0003, 0.001, 0.003]
+  weight-decay:
+    values: [0.0, 0.0001, 0.001]
+  seed:
+    value: 42
+  hidden-dim:
+    values: [128, 256, 512]
+  dropout:
+    values: [0.0, 0.2, 0.4]
+  epochs:
+    value: 60
+  patience:
+    value: 8
+  min-delta:
+    value: 0.0
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --inputs-path
+  - outputs/oov-selection/mean_pool-fasttext-seed42-20261030-103403-73a9199b/inputs.pt
+  - --device
+  - mps
+  - --output-dir
+  - outputs/overnight-mean-pool
+  - --wandb-project
+  - nlp-classifier
+  - --wandb-entity
+  - laurin-uni-workspace
+  - --wandb-group
+  - P1-MeanPool-Batch-LR-Decay-Dropout-Width
+  - --wandb-mode
+  - online
+  - --wandb-name
+  - MeanPool--head{hidden_dim}-b{batch_size}-lr{learning_rate}-d{dropout}-wd{weight_decay}-s{seed}
