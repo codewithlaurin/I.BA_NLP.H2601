@@ -8,6 +8,7 @@ from pathlib import Path
 from time import perf_counter
 
 import torch
+from torch.optim.lr_scheduler import LRScheduler, OneCycleLR
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import BertConfig, BertModel, get_linear_schedule_with_warmup
@@ -27,8 +28,48 @@ REVISION = "cd5ef92a9fb2f889e972770a36d4ed042daf221e"
 # Settings that must match when resuming, because they define the run.
 # The batch size is checked separately because it may be chosen automatically.
 RESUME_SETTINGS = (
-    "initialization", "epochs", "learning_rate", "weight_decay", "warmup_ratio", "seed",
+    "initialization", "epochs", "learning_rate", "weight_decay", "scheduler", "warmup_ratio", "seed",
 )
+# Share of steps spent increasing the learning rate, unless --warmup-ratio is given.
+DEFAULT_WARMUP_RATIO = {"linear": 0.1, "onecycle": 0.3}
+
+
+def build_scheduler(
+    name: str, optimizer: torch.optim.Optimizer, peak_learning_rate: float,
+    warmup_ratio: float, total_steps: int,
+) -> LRScheduler:
+    """Both schedules rise linearly to the peak and then fall linearly to about 0.
+
+    linear: from 0, peak after warmup_ratio of the steps, end at 0.
+    onecycle: PyTorch OneCycleLR with linear annealing, from peak/25, peak after
+    warmup_ratio of the steps, end at peak/250,000. AdamW's beta1 stays fixed
+    (cycle_momentum=False), so only the learning rate follows the cycle.
+    """
+    if name == "linear":
+        return get_linear_schedule_with_warmup(optimizer, round(warmup_ratio * total_steps), total_steps)
+    return OneCycleLR(
+        optimizer, max_lr=peak_learning_rate, total_steps=total_steps, pct_start=warmup_ratio,
+        anneal_strategy="linear", cycle_momentum=False,
+    )
+
+
+def format_learning_rate(value: float) -> str:
+    """Readable scientific notation: 1e-05 -> '1e-5', 3.16e-05 -> '3.2e-5'."""
+    mantissa, exponent = f"{value:.1e}".split("e")
+    return f"{mantissa.removesuffix('.0')}e{int(exponent)}"
+
+
+def describe_run(args: argparse.Namespace) -> tuple[str, str]:
+    """Return a W&B display name and a file-system-safe directory name.
+
+    Only the settings that differ between Project 2 runs appear; shared ones
+    (architecture, epochs, batch size) are in the run configuration.
+    """
+    learning_rate = format_learning_rate(args.learning_rate)
+    initialization = "random init" if args.initialization == "random" else "pretrained"
+    display_name = f"{initialization} | {args.scheduler} | lr {learning_rate} | seed {args.seed}"
+    directory_name = f"{args.initialization}_{args.scheduler}_lr{learning_rate}_seed{args.seed}"
+    return display_name, directory_name
 
 
 def parse_batch_size(value: str) -> str | int:
@@ -88,7 +129,9 @@ def main() -> None:
     parser.add_argument("--max-batch-size", type=int, help="Optional cap for --batch-size auto")
     parser.add_argument("--learning-rate", type=float, default=1e-5, help="Peak learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--warmup-ratio", type=float, default=0.1, help="Share of steps for linear warmup")
+    parser.add_argument("--scheduler", choices=("linear", "onecycle"), default="linear")
+    parser.add_argument("--warmup-ratio", type=float,
+                        help="Share of steps rising to the peak (default: 0.1 linear, 0.3 onecycle)")
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
@@ -106,11 +149,13 @@ def main() -> None:
         parser.error("memory margin must be in [0, 1)")
     if args.learning_rate <= 0 or args.weight_decay < 0:
         parser.error("learning rate must be positive and weight decay nonnegative")
-    if not 0 <= args.warmup_ratio < 1:
-        parser.error("warmup ratio must be in [0, 1)")
+    if args.warmup_ratio is None:
+        args.warmup_ratio = DEFAULT_WARMUP_RATIO[args.scheduler]
+    if not 0 <= args.warmup_ratio < 1 or (args.scheduler == "onecycle" and args.warmup_ratio == 0):
+        parser.error("warmup ratio must be in [0, 1), and above 0 for onecycle")
     seed_everything(args.seed)
     device = select_device() if args.device == "auto" else torch.device(args.device)
-    run_name = f"{args.initialization}-lr{args.learning_rate:g}-seed{args.seed}"
+    run_name, directory_name = describe_run(args)
     resumed = None
     if args.resume:
         resumed = torch.load(args.resume, map_location="cpu", weights_only=True)
@@ -124,7 +169,7 @@ def main() -> None:
     output_dir = args.resume.parent if args.resume else args.output_dir
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = Path("outputs/project2") / f"{run_name}-{timestamp}"
+        output_dir = Path("outputs/project2") / f"{directory_name}_{timestamp}"
     if not args.resume:
         output_dir.mkdir(parents=True, exist_ok=False)
     print(f"Device: {device}; output: {output_dir}", flush=True)
@@ -167,7 +212,11 @@ def main() -> None:
         "run_name": run_name, "checkpoint": CHECKPOINT, "revision": REVISION, "device": str(device),
         "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "optimizer": "AdamW", "loss": "CrossEntropyLoss", "gradient_clip_norm": 1.0,
-        "scheduler": "linear_warmup_decay", "warmup_steps": warmup_steps, "total_steps": total_steps,
+        "warmup_steps": warmup_steps, "total_steps": total_steps,
+        "scheduler_details": (
+            "LambdaLR: linear 0 -> peak -> 0" if args.scheduler == "linear" else
+            "OneCycleLR: anneal_strategy=linear, div_factor=25, final_div_factor=1e4, cycle_momentum=False"
+        ),
         "early_stopping_metric": "validation accuracy, validation loss as tie-breaker",
         "truncation": False, "padding": "dynamic",
         "split_fingerprints": {name: raw[name]._fingerprint for name in splits},
@@ -180,7 +229,7 @@ def main() -> None:
         [{"params": decay, "weight_decay": args.weight_decay},
          {"params": no_decay, "weight_decay": 0.0}], lr=args.learning_rate,
     )
-    scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+    scheduler = build_scheduler(args.scheduler, optimizer, args.learning_rate, args.warmup_ratio, total_steps)
     if resumed:
         # Load after creating the scheduler: the saved optimizer state restores the
         # current learning rate, and the scheduler state restores the step count.
@@ -199,6 +248,9 @@ def main() -> None:
         settings, run_name, output_dir, tracking_config, args.wandb_group,
         run_id=resumed["wandb_run_id"] if resumed else None,
     ) as tracking:
+        if args.wandb_mode != "disabled":
+            # A sweep agent may assign its own generated name; keep the descriptive one.
+            tracking.name = run_name
         identity = run_details(tracking, args.wandb_mode)
         (output_dir / "wandb.json").write_text(json.dumps(identity, indent=2) + "\n")
         started = perf_counter()
@@ -209,6 +261,9 @@ def main() -> None:
                 splits["train"], batch_size=batch_size, shuffle=True, collate_fn=collator,
                 generator=torch.Generator().manual_seed(args.seed + epoch),
             )
+            # Log the rate the epoch starts with: after the final step, OneCycleLR
+            # extrapolates past its end (even below 0), a value never used for an update.
+            learning_rate = optimizer.param_groups[0]["lr"]
             train = run_epoch(
                 None, model, tqdm(train_loader, desc=f"Epoch {epoch} train"), device,
                 optimizer, 1.0, scheduler,
@@ -216,7 +271,7 @@ def main() -> None:
             validation = run_epoch(None, model, tqdm(validation_loader, desc=f"Epoch {epoch} validation"), device)
             metrics = {
                 "epoch": epoch, "train": train, "validation": validation,
-                "learning_rate": scheduler.get_last_lr()[0],
+                "learning_rate": learning_rate,
                 "elapsed_seconds": previous_seconds + perf_counter() - started,
             }
             with (output_dir / "metrics.jsonl").open("a") as stream:
