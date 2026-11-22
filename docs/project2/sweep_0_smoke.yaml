@@ -1,0 +1,53 @@
+# Stage 0 - setup check (1 run, hidden in the final W&B view).
+# Question: does the sweep path work on the GPU, and which batch size and epoch time result?
+#
+# 1. Start the agent. After the "epoch": 1 metrics line, stop it with Ctrl+C.
+# 2. Resume the same run manually:
+#      uv run python train_transformer.py --initialization pretrained --scheduler linear \
+#        --learning-rate 1e-5 --epochs 2 --patience 10 --seed 42 --batch-size auto \
+#        --device cuda --wandb-group P2-Smoke --resume outputs/project2/<run dir>/last.pt
+# 3. Check: one continuous W&B run named "pretrained | linear | lr 1e-5 | seed 42", learning-rate curve
+#    continues, summary.json has checkpoint_verified: true, last.pt is deleted.
+# 4. Note batch_size and gpu from config.json and the seconds per epoch from metrics.jsonl.
+#    Put batch_size into the later sweeps (replace SET_FROM_SMOKE).
+name: P2-Smoke
+description: Two-epoch setup check of the Project 2 sweep path, interrupted and resumed.
+program: train_transformer.py
+entity: laurin-uni-workspace
+project: nlp-transformers
+method: grid
+run_cap: 1
+
+metric:
+  name: best_validation_accuracy
+  goal: maximize
+
+parameters:
+  initialization:
+    value: pretrained
+  scheduler:
+    value: linear
+  learning-rate:
+    value: 0.00001
+  epochs:
+    value: 2
+  patience:
+    value: 10
+  seed:
+    value: 42
+  batch-size:
+    value: auto
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - cuda
+  - --wandb-mode
+  - online
+  - --wandb-group
+  - P2-Smoke
