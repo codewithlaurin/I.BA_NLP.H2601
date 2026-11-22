@@ -9,7 +9,7 @@
 # 3. Check: one continuous W&B run named "pretrained | linear | lr 1e-5 | seed 42", learning-rate curve
 #    continues, summary.json has checkpoint_verified: true, last.pt is deleted.
 # 4. Note batch_size and gpu from config.json and the seconds per epoch from metrics.jsonl.
-#    Put batch_size into the later sweeps (replace SET_FROM_SMOKE).
+
 name: P2-Smoke
 description: Two-epoch setup check of the Project 2 sweep path, interrupted and resumed.
 program: train_transformer.py

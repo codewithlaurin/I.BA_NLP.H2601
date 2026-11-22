@@ -1,0 +1,59 @@
+# Stage 1 - main search (16 runs).
+# Questions:
+#   Q1  Which order of magnitude of peak learning rate suits fine-tuning vs. training from scratch?
+#   Q2  Does OneCycle (linear annealing, peak at 30% of steps) beat linear warmup/decay (peak at 10%),
+#       with each schedule evaluated over the full learning-rate grid, i.e. at its own best rate?
+#
+# Grid: 2 initializations x 4 learning rates (one decade apart) x 2 schedules, seed 42.
+# The shared grid gives each model one decade beyond its expected optimum: 1e-3 above the usual
+# fine-tuning range (~1e-5), 1e-6 below the usual from-scratch range (~1e-4).
+# Every run: exactly 10 epochs (patience = cap: no early stopping, every schedule decays fully),
+# best epoch selected by validation accuracy. A run with a non-finite loss stops with an error and
+# counts as "learning rate too high".
+#
+# Next: stage 2 if a model's best learning rate is 1e-6 or 1e-3 (or two decades are within noise),
+# then stage 3 seeds for the selected configuration per model.
+#
+# Batch size 32, fixed for stages 1-3 (not the GPU maximum; see "Batch size" in PROJECT2.md).
+# Use the same GPU type (Clariden GH200) for all stages.
+name: P2-Search
+description: Random vs. pretrained bert-base-cased on ART - learning rate x schedule, seed 42.
+program: train_transformer.py
+entity: laurin-uni-workspace
+project: nlp-transformers
+method: grid
+run_cap: 16
+
+metric:
+  name: best_validation_accuracy
+  goal: maximize
+
+parameters:
+  initialization:
+    values: [pretrained, random]
+  learning-rate:
+    values: [0.000001, 0.00001, 0.0001, 0.001]
+  scheduler:
+    values: [linear, onecycle]
+  epochs:
+    value: 10
+  patience:
+    value: 10
+  seed:
+    value: 42
+  batch-size:
+    value: 32
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - cuda
+  - --wandb-mode
+  - online
+  - --wandb-group
+  - P2-Search
