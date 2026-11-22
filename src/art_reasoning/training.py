@@ -159,12 +159,14 @@ def run_epoch(
     device: torch.device | str,
     optimizer: torch.optim.Optimizer | None = None,
     gradient_clip_norm: float | None = None,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
 ) -> dict:
     """Return example-weighted loss, accuracy, and count; update only in training.
 
     Logits have shape (B, 2); integer labels have shape (B,) with values 0/1.
     CrossEntropyLoss receives raw logits, with no preceding softmax or sigmoid.
     Pass input_builder=None for an RNNClassifier that owns its encoder.
+    An optional scheduler is stepped once after every optimizer step.
     """
     training = optimizer is not None
     if input_builder is not None:
@@ -193,6 +195,8 @@ def run_epoch(
                     gradient_norm_max = max(gradient_norm_max, norm)
                     gradient_steps += 1
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
             count = batch.labels.numel()
             loss_sum += loss.detach().item() * count
             correct += (logits.detach().argmax(dim=-1) == batch.labels).sum().item()

@@ -34,11 +34,13 @@ def start_run(
     tracking: TrackingConfig,
     group: str | None = None,
     job_type: str = "train",
+    run_id: str | None = None,
 ) -> wandb.Run:
     """Start a run; credentials come from wandb login or WANDB_API_KEY.
 
     Use the returned run as a context manager so success and exceptions both
     finish the run. Never pass credentials in config: that dictionary is logged.
+    Pass the run_id of an interrupted run to continue logging into that run.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     run = wandb.init(
@@ -50,6 +52,8 @@ def start_run(
         config=config,
         mode=tracking.mode,
         dir=str(run_dir.resolve()),
+        id=run_id,
+        resume="allow" if run_id else None,
     )
     run.define_metric("epoch")
     for name in ("train/*", "validation/*", "learning_rate"):

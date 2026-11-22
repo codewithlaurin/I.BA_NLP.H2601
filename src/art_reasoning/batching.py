@@ -139,6 +139,45 @@ def find_gpu_batch_size(
     if sequence.numel() == 0:
         sequence = torch.full((1,), Vocabulary.PAD_ID, dtype=torch.long)
 
+    def make_batch(size: int) -> TextBatch:
+        return TextBatch(
+            token_ids=sequence.to(device).reshape(1, 1, width).expand(
+                size, len(TEXT_FIELDS), width
+            ).clone(),
+            lengths=torch.full(
+                (size, len(TEXT_FIELDS)), length, dtype=torch.long, device=device
+            ),
+            labels=torch.zeros(size, dtype=torch.long, device=device),
+        )
+
+    return find_largest_batch_size(
+        make_batch, device, limit, memory_margin=memory_margin, probe_step=probe_step
+    )
+
+
+def find_largest_batch_size(
+    make_batch: Callable[[int], object],
+    device: torch.device | str,
+    limit: int,
+    *,
+    memory_margin: float = 0.2,
+    probe_step: Callable[[object], object] | None = None,
+) -> int:
+    """Return the largest size whose make_batch(size) and probe_step fit on a GPU.
+
+    make_batch must build a worst-case batch directly on the device. Memory
+    already allocated when this function starts (e.g. a disposable model) is
+    the baseline; everything the batch and probe_step add counts against
+    (1 - memory_margin) of the free memory. See find_gpu_batch_size for the
+    CUDA/MPS measurement details.
+    """
+    device = torch.device(device)
+    if not 0 <= memory_margin < 1:
+        raise ValueError("memory_margin must be between 0 (inclusive) and 1")
+    if limit < 1:
+        raise ValueError("Batch size limit must be positive")
+    if device.type not in ("cuda", "mps"):
+        raise ValueError("Automatic sizing supports CUDA or MPS")
     backend = torch.cuda if device.type == "cuda" else torch.mps
     backend.empty_cache()
     if device.type == "cuda":
@@ -150,22 +189,12 @@ def find_gpu_batch_size(
     budget = free_memory * (1 - memory_margin)
 
     def fits(size: int) -> bool:
-        ids = batch = result = None
+        batch = result = None
         try:
             backend.empty_cache()
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
-            ids = sequence.to(device).reshape(1, 1, width).expand(
-                size, len(TEXT_FIELDS), width
-            ).clone()
-            batch = TextBatch(
-                token_ids=ids,
-                lengths=torch.full(
-                    (size, len(TEXT_FIELDS)), length, dtype=torch.long, device=device
-                ),
-                labels=torch.zeros(size, dtype=torch.long, device=device),
-            )
-            ids = None
+            batch = make_batch(size)
             if probe_step is not None:
                 result = probe_step(batch)
             if device.type == "cuda":
@@ -180,7 +209,7 @@ def find_gpu_batch_size(
                 return False
             raise
         finally:
-            ids = batch = result = None
+            batch = result = None
             backend.empty_cache()
 
     largest = _largest_fitting_size(fits, limit)
