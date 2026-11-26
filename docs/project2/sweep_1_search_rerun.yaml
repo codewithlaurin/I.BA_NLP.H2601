@@ -1,0 +1,47 @@
+# Stage 1 - rerun of the one grid point whose run failed in sweep_1_search.yaml (1 run).
+# Same settings as stage 1, same W&B group, so it completes the stage-1 grid. It runs in the stage-2 job;
+# if it beats the best random configuration (onecycle 1e-4, 0.661), the random stage-2 schedule has to be
+# revisited before stage 3.
+name: P2-Search-Rerun
+description: Stage-1 grid point random init, linear, lr 1e-5, seed 42, whose run failed.
+program: train_transformer.py
+entity: laurin-uni-workspace
+project: nlp-transformers
+method: grid
+run_cap: 1
+
+metric:
+  name: best_validation_accuracy
+  goal: maximize
+
+parameters:
+  initialization:
+    value: random
+  learning-rate:
+    value: 0.00001
+  dropout:
+    value: 0.1
+  scheduler:
+    value: linear
+  epochs:
+    value: 10
+  patience:
+    value: 10
+  seed:
+    value: 42
+  batch-size:
+    value: 128
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - cuda
+  - --wandb-mode
+  - online
+  - --wandb-group
+  - P2-Search
