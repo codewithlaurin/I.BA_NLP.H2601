@@ -1,0 +1,52 @@
+# Stage 2 - pretrained: 20-epoch budget at lr 1e-5, with dropout 0.1 and 0.3 (2 runs).
+# Runs in one job with sweep_2_budget_random.yaml.
+#
+# Question (Q6): does a longer budget improve validation accuracy at the lower learning rate, and does
+# dropout 0.3 only pay off with more time?
+# Stages 1-2 (10 epochs): dropout 0.3 was still learning at epoch 10 (validation loss still falling,
+# 0.827); dropout 0.1 had plateaued since epoch 4 (0.853). Both dropouts get the longer budget, so
+# budget and dropout effects can be separated. Same budget for both models; no early stopping
+# (patience = epochs), so the schedule decays fully. The 10-epoch runs exist from stages 1-2.
+name: P2-Budget-Pretrained
+description: Pretrained, linear, lr 1e-5, dropout {0.1, 0.3}, 20 epochs, seed 42.
+program: train_transformer.py
+entity: laurin-uni-workspace
+project: nlp-transformers
+method: grid
+run_cap: 2
+
+metric:
+  name: best_validation_accuracy
+  goal: maximize
+
+parameters:
+  initialization:
+    value: pretrained
+  learning-rate:
+    value: 0.00001
+  dropout:
+    values: [0.1, 0.3]
+  scheduler:
+    value: linear
+  epochs:
+    value: 20
+  patience:
+    value: 20
+  seed:
+    value: 42
+  batch-size:
+    value: 128
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - cuda
+  - --wandb-mode
+  - online
+  - --wandb-group
+  - P2-Budget
