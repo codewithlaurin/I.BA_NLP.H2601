@@ -1,10 +1,10 @@
 # Stage 0 - setup check (1 run, hidden in the final W&B view).
-# Question: does the sweep path work on the GPU, and which batch size and epoch time result?
+# Question: does the sweep path work on the GPU, and which epoch time results?
 #
 # 1. Start the agent. After the "epoch": 1 metrics line, stop it with Ctrl+C.
 # 2. Resume the same run manually:
 #      uv run python train_transformer.py --initialization pretrained --scheduler linear \
-#        --learning-rate 1e-5 --epochs 2 --patience 10 --seed 42 --batch-size auto \
+#        --learning-rate 1e-5 --epochs 2 --patience 10 --seed 42 --batch-size 128 \
 #        --device cuda --wandb-group P2-Smoke --resume outputs/project2/<run dir>/last.pt
 # 3. Check: one continuous W&B run named "pretrained | linear | lr 1e-5 | seed 42", learning-rate curve
 #    continues, summary.json has checkpoint_verified: true, last.pt is deleted.
@@ -36,7 +36,7 @@ parameters:
   seed:
     value: 42
   batch-size:
-    value: auto
+    value: 128
 
 command:
   - ${env}

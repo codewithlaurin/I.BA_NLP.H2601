@@ -28,10 +28,13 @@ REVISION = "cd5ef92a9fb2f889e972770a36d4ed042daf221e"
 # Settings that must match when resuming, because they define the run.
 # The batch size is checked separately because it may be chosen automatically.
 RESUME_SETTINGS = (
-    "initialization", "epochs", "learning_rate", "weight_decay", "scheduler", "warmup_ratio", "seed",
+    "initialization", "epochs", "learning_rate", "weight_decay", "dropout", "scheduler",
+    "warmup_ratio", "seed",
 )
 # Share of steps spent increasing the learning rate, unless --warmup-ratio is given.
 DEFAULT_WARMUP_RATIO = {"linear": 0.1, "onecycle": 0.3}
+# bert-base-cased's own dropout probability; run names mention dropout only when it differs.
+DEFAULT_DROPOUT = 0.1
 
 
 def build_scheduler(
@@ -63,13 +66,19 @@ def describe_run(args: argparse.Namespace) -> tuple[str, str]:
     """Return a W&B display name and a file-system-safe directory name.
 
     Only the settings that differ between Project 2 runs appear; shared ones
-    (architecture, epochs, batch size) are in the run configuration.
+    (architecture, epochs, batch size) are in the run configuration. Dropout
+    appears only when it differs from BERT's default, so earlier names stay valid.
     """
     learning_rate = format_learning_rate(args.learning_rate)
     initialization = "random init" if args.initialization == "random" else "pretrained"
-    display_name = f"{initialization} | {args.scheduler} | lr {learning_rate} | seed {args.seed}"
-    directory_name = f"{args.initialization}_{args.scheduler}_lr{learning_rate}_seed{args.seed}"
-    return display_name, directory_name
+    display_parts = [initialization, args.scheduler, f"lr {learning_rate}"]
+    directory_parts = [args.initialization, args.scheduler, f"lr{learning_rate}"]
+    if args.dropout != DEFAULT_DROPOUT:
+        display_parts.append(f"dropout {args.dropout:g}")
+        directory_parts.append(f"dropout{args.dropout:g}")
+    display_parts.append(f"seed {args.seed}")
+    directory_parts.append(f"seed{args.seed}")
+    return " | ".join(display_parts), "_".join(directory_parts)
 
 
 def parse_batch_size(value: str) -> str | int:
@@ -129,6 +138,8 @@ def main() -> None:
     parser.add_argument("--max-batch-size", type=int, help="Optional cap for --batch-size auto")
     parser.add_argument("--learning-rate", type=float, default=1e-5, help="Peak learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--dropout", type=float, default=DEFAULT_DROPOUT,
+                        help="Dropout probability in all BERT dropout layers and the scoring head")
     parser.add_argument("--scheduler", choices=("linear", "onecycle"), default="linear")
     parser.add_argument("--warmup-ratio", type=float,
                         help="Share of steps rising to the peak (default: 0.1 linear, 0.3 onecycle)")
@@ -149,6 +160,8 @@ def main() -> None:
         parser.error("memory margin must be in [0, 1)")
     if args.learning_rate <= 0 or args.weight_decay < 0:
         parser.error("learning rate must be positive and weight decay nonnegative")
+    if not 0 <= args.dropout < 1:
+        parser.error("dropout must be in [0, 1)")
     if args.warmup_ratio is None:
         args.warmup_ratio = DEFAULT_WARMUP_RATIO[args.scheduler]
     if not 0 <= args.warmup_ratio < 1 or (args.scheduler == "onecycle" and args.warmup_ratio == 0):
@@ -175,7 +188,7 @@ def main() -> None:
     print(f"Device: {device}; output: {output_dir}", flush=True)
     model, tokenizer = load_bert_components(
         pretrained=args.initialization == "pretrained" and resumed is None,
-        checkpoint=CHECKPOINT, revision=REVISION,
+        checkpoint=CHECKPOINT, revision=REVISION, dropout=args.dropout,
     )
     if resumed:
         model.load_state_dict(resumed["model_state"])

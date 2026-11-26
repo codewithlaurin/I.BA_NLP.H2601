@@ -1,6 +1,3 @@
-sbatch --account=g239 docs/project2/clariden_smoke.sbatch ekp6r2o7
-
-cat > docs/project2/clariden_smoke.sbatch <<'EOF'
 #!/bin/bash
 # Stage 0 on Clariden: environment check, then the P2-Smoke sweep run, interrupted after epoch 1
 # and resumed, so the sweep path, run naming, resuming and checkpoint restore are all exercised.
@@ -45,7 +42,7 @@ wait "$agent_pid" || true
 
 echo "== Resume the same run"
 uv run python train_transformer.py --initialization pretrained --scheduler linear \
-    --learning-rate 1e-5 --epochs 2 --patience 10 --seed 42 --batch-size auto \
+    --learning-rate 1e-5 --epochs 2 --patience 10 --seed 42 --batch-size 128 \
     --device cuda --wandb-group P2-Smoke --resume "${run_dir}/last.pt"
 
 echo "== Checks"
@@ -59,5 +56,3 @@ for line in open(sys.argv[1]):
           '| validation accuracy', m['validation']['accuracy'])
 " "${run_dir}/metrics.jsonl"
 if [[ -e "${run_dir}/last.pt" ]]; then echo "FAIL: last.pt still exists"; else echo "OK: last.pt removed"; fi
-
-EOF

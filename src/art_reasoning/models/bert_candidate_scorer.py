@@ -23,9 +23,17 @@ class BertCandidateScorer(nn.Module):
         *,
         pretrained: bool = True,
         revision: str | None = None,
+        dropout: float | None = None,
     ) -> "BertCandidateScorer":
-        """Keep the architecture fixed; only the encoder initialization differs."""
-        config = BertConfig.from_pretrained(checkpoint, revision=revision)
+        """Keep the architecture fixed; only the encoder initialization differs.
+
+        dropout replaces the checkpoint's dropout probability (0.1 for BERT) in the
+        embeddings, attention, and hidden layers; the scoring head uses the same value.
+        """
+        overrides = {} if dropout is None else {
+            "hidden_dropout_prob": dropout, "attention_probs_dropout_prob": dropout,
+        }
+        config = BertConfig.from_pretrained(checkpoint, revision=revision, **overrides)
         if pretrained:
             encoder = BertModel.from_pretrained(
                 checkpoint, config=config, revision=revision, add_pooling_layer=False
@@ -56,10 +64,11 @@ def load_bert_components(
     pretrained: bool,
     checkpoint: str = "google-bert/bert-base-cased",
     revision: str | None = "cd5ef92a9fb2f889e972770a36d4ed042daf221e",
+    dropout: float | None = None,
 ) -> tuple[BertCandidateScorer, PreTrainedTokenizerBase]:
     """Load either initialization with the same checkpoint's fixed tokenizer."""
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, revision=revision)
     model = BertCandidateScorer.from_checkpoint(
-        checkpoint, pretrained=pretrained, revision=revision
+        checkpoint, pretrained=pretrained, revision=revision, dropout=dropout
     )
     return model, tokenizer
