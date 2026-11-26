@@ -1,0 +1,52 @@
+# Stage 2 - random initialization: dropout 0.3 at the two stage-1 learning rates around the optimum (2 runs).
+# Runs in one job with sweep_2_dropout_pretrained.yaml.
+#
+# Question (Q5): does dropout 0.3 reduce overfitting and improve validation accuracy?
+# Stage 1 (batch 128, onecycle, dropout 0.1): at 1e-4 the best epoch is 2 (0.661), then training accuracy
+# reaches 0.95 and validation loss 1.43; at 1e-5 the best epoch is 8 (0.659) with little overfitting.
+# Dropout and learning rate interact, so dropout 0.3 is tested at both candidate rates. The dropout 0.1
+# runs at 1e-5 and 1e-4 exist from stage 1. No half-decade learning rate (see "Stage 2 design" in
+# PROJECT2.md).
+name: P2-Dropout-Random
+description: Random init, onecycle, lr {1e-5, 1e-4}, dropout 0.3, seed 42.
+program: train_transformer.py
+entity: laurin-uni-workspace
+project: nlp-transformers
+method: grid
+run_cap: 2
+
+metric:
+  name: best_validation_accuracy
+  goal: maximize
+
+parameters:
+  initialization:
+    value: random
+  learning-rate:
+    values: [0.00001, 0.0001]
+  dropout:
+    value: 0.3
+  scheduler:
+    value: onecycle
+  epochs:
+    value: 10
+  patience:
+    value: 10
+  seed:
+    value: 42
+  batch-size:
+    value: 128
+
+command:
+  - ${env}
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --device
+  - cuda
+  - --wandb-mode
+  - online
+  - --wandb-group
+  - P2-Dropout
